@@ -1,6 +1,6 @@
 ## qemu 中断虚拟化框架分析
 
-## 本节从qemu模拟的i8259a(PIC)和IOAPIC出发，结合qemu-kvm下虚拟化原理来分析qemu中断虚拟化框架。
+本节从qemu模拟的i8259a(PIC)和IOAPIC出发，结合qemu-kvm下虚拟化原理来分析qemu中断虚拟化框架。
 
 ### 1. 中断控制器的创建和初始化
 考虑到中断实时性对性能的影响，PIC和IOAPIC的设备模拟主要逻辑都放到了kvm模块进行实现。
@@ -32,6 +32,7 @@ qemu在kvm内核中创建完成PIC和IOAPIC后将全局变量*kvm_kernel_irqchip
 
 PIC主要针对与传统的单核处理器体系结构，在SMP系统上则是通过IOAPIC和每个CPU内部的LAPIC来构成整个中断系统的。
 ![ioapic](images/ioapic.png)
+
 如上图所描述，IOAPIC 负责接受中断并将中断格式化化成中断消息，并按照一定规则转发给LAPIC。LAPIC内部有IRR(Interrupt Reguest Register)和ISR(Interrupt Service Register)等2个重要寄存器。系统在处理一个vector的同时缓存着一个相同的vector，vector通过2个256-bit寄存器标志，对应位置位则表示上报了vector请求或者正在处理中。另外LAPIC提供了TPR(Task Priority Register)，PPR(Processor Priority Register)来设置LAPIC的task优先级和CPU的优先级，当IOAPIC转发的终端vector优先级小于LAPIC设置的TPR时，此中断不能打断当前cpu上运行的task；当中断vector的优先级小于LAPIC设置的PPR时此cpu不处理这个中断。操作系统通过动态设置TPR和PPR来实现系统的实时性需求和中断负载均衡。
 
 IOAPIC为了实现中断路由(Interrupt Routing)会维护一个中断路由表信息，内核中相关的数据结构为:
