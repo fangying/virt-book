@@ -35,27 +35,14 @@ PIC主要针对与传统的单核处理器体系结构，在SMP系统上则是�
 
 如上图所描述，IOAPIC 负责接受中断并将中断格式化化成中断消息，并按照一定规则转发给LAPIC。LAPIC内部有IRR(Interrupt Reguest Register)和ISR(Interrupt Service Register)等2个重要寄存器。系统在处理一个vector的同时缓存着一个相同的vector，vector通过2个256-bit寄存器标志，对应位置位则表示上报了vector请求或者正在处理中。另外LAPIC提供了TPR(Task Priority Register)，PPR(Processor Priority Register)来设置LAPIC的task优先级和CPU的优先级，当IOAPIC转发的终端vector优先级小于LAPIC设置的TPR时，此中断不能打断当前cpu上运行的task；当中断vector的优先级小于LAPIC设置的PPR时此cpu不处理这个中断。操作系统通过动态设置TPR和PPR来实现系统的实时性需求和中断负载均衡。
 
-IOAPIC为了实现中断路由(Interrupt Routing)会维护一个中断路由表信息，内核中相关的数据结构为:
+qemu 中为了记录pic和ioapic的中断处理回调函数，定义了一个GSIState类型的结构体：
 
-    struct kvm_irq_routing {
-        __u32 nr;
-        __u32 flags;
-        struct kvm_irq_routing_entry entries[0];
-    };
+    typedef struct GSIState {
+        qemu_irq i8259_irq[ISA_NUM_IRQS];
+        qemu_irq ioapic_irq[IOAPIC_NUM_PINS];
+    } GSIState;
 
-    struct kvm_irq_routing_entry {
-        __u32 gsi;
-        __u32 type;
-        __u32 flags;
-        __u32 pad;
-        union {
-            struct kvm_irq_routing_irqchip irqchip;
-            struct kvm_irq_routing_msi msi;
-            struct kvm_irq_routing_s390_adapter adapter;
-            struct kvm_irq_routing_hv_sint hv_sint;
-            __u32 pad[8];
-        } u;
-    };
+在qemu主板初始化逻辑函数pc_init1中会分别分配ioapic和pic的qemu_irq并初始化注册handler。ioapic注册的handler为kvm_pc_gsi_handler函数opaque参数为qdev_get_gpio_in,pic注册的handler为kvm_pic_set_irq。
 
 #### (2) 用户态和内核态的中断关联
 中断处理的逻辑放在kvm内核模块中进行实现，但设备的模拟呈现还是需要qemu设备模拟器来搞定，最后qemu和kvm一起配合完成快速中断处理的流程。
@@ -78,3 +65,83 @@ ioapic的初始化流程:
                     |--> if kvm_ioapic_in_kernel()
                         |--> dev = qdev_create(NULL, "kvm-ioapic")
 
+
+
+IOAPIC为了实现中断路由(Interrupt Routing)会维护一个中断路由表信息，内核中相关的数据结构为:
+
+    struct kvm_irq_routing {
+        __u32 nr;
+        __u32 flags;
+        struct kvm_irq_routing_entry entries[0];
+    };
+
+    struct kvm_irq_routing_entry {
+        __u32 gsi;
+        __u32 type;
+        __u32 flags;
+        __u32 pad;
+        union {
+            struct kvm_irq_routing_irqchip irqchip;
+            struct kvm_irq_routing_msi msi;
+            struct kvm_irq_routing_s390_adapter adapter;
+            struct kvm_irq_routing_hv_sint hv_sint;
+            __u32 pad[8];
+        } u;
+    };
+
+    中断路由表的设备为kvm_pc_setup_irq_routing函数
+
+        void kvm_pc_setup_irq_routing(bool pci_enabled)
+        {
+            KVMState *s = kvm_state;
+            int i;
+
+            if (kvm_check_extension(s, KVM_CAP_IRQ_ROUTING)) {
+                for (i = 0; i < 8; ++i) {
+                    if (i == 2) {
+                        continue;
+                    }
+                    kvm_irqchip_add_irq_route(s, i, KVM_IRQCHIP_PIC_MASTER, i);
+                }
+                for (i = 8; i < 16; ++i) {
+                    kvm_irqchip_add_irq_route(s, i, KVM_IRQCHIP_PIC_SLAVE, i - 8);
+                }
+                if (pci_enabled) {
+                    for (i = 0; i < 24; ++i) {
+                        if (i == 0) {
+                            kvm_irqchip_add_irq_route(s, i, KVM_IRQCHIP_IOAPIC, 2);
+                        } else if (i != 2) {
+                            kvm_irqchip_add_irq_route(s, i, KVM_IRQCHIP_IOAPIC, i);
+                        }
+                    }
+                }
+                kvm_irqchip_commit_routes(s);
+            }
+        }
+
+
+ 内核中断处理流程
+
+    kvm_vm_ioctl
+    {
+        case KVM_IRQ_LINE_STATUS:
+        case KVM_IRQ_LINE: {
+            struct kvm_irq_level irq_event;
+
+            r = -EFAULT;
+            if (copy_from_user(&irq_event, argp, sizeof(irq_event)))
+                goto out;
+
+            r = kvm_vm_ioctl_irq_line(kvm, &irq_event,
+                        ioctl == KVM_IRQ_LINE_STATUS);
+            if (r)
+                goto out;
+
+            r = -EFAULT;
+            if (ioctl == KVM_IRQ_LINE_STATUS) {
+                if (copy_to_user(argp, &irq_event, sizeof(irq_event)))
+                    goto out;
+            }
+
+            r = 0;
+    }
